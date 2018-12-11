@@ -17,6 +17,7 @@ DEFAULT_IRONIC_API_VERSION = '1.22'
 
 VALID_FIELDS = ['index', 'sn', 'ipmi_addr', 'ipmi_netmask', 'ipmi_gateway']
 
+
 def get_ironic_client():
     args = {
         'token': 'noauth',
@@ -73,6 +74,38 @@ def export_tpl():
     print('Generate ipmi_conf excel template ipmi_conf.xls successfully!')
 
 
+def import_raid_config(file_name):
+    """
+    collect raid configuration from input yaml file
+
+    configuration file format:
+        configs:
+          - name:
+            sn:
+            num:
+              ssd:
+              sata:
+              sas:
+            tasks:
+               - size:
+                 type:
+                 level:
+               - size:
+                 type:
+                 level:
+               ...
+    """
+
+    import yaml
+    try:
+        with open(file_name) as fd:
+            configs = yaml.safe_load(fd)
+            dbapi.API().save_all_raid_opts(configs.get('configs', []))
+        print('successfully save input raid configuration options to database')
+    except Exception as e:
+        print(e)
+
+
 def export_raid_xls():
     """
     export raid configuration in database to excel sheet
@@ -108,10 +141,65 @@ def export_raid_xls():
 
         row += 1
 
-
     # ws.col(0).width = 256*20
     wb.save('raid_config.xls')
     print('Generate raid_config excel template raid_config.xls successfully!')
+
+
+def direct_insert_conf(conf):
+    print('conf file: %s' % conf)
+    # If conf file existed
+    if not os.path.exists(conf):
+        print('Please input configured file!')
+        exit(1)
+
+    book = xlrd.open_workbook(conf)
+    sh = book.sheet_by_name('ipmi conf')
+    # Validate fields of row 0
+    for col in range(len(VALID_FIELDS)):
+        if sh.cell_value(0, col) != VALID_FIELDS[col]:
+            print('Invalid field: ', sh.cell_value(0, col),
+                  ', should be ', VALID_FIELDS[col])
+            exit(1)
+
+    db_api = dbapi.API()
+    for row in range(1, sh.nrows):
+        confed_sn = sh.cell_value(row, VALID_FIELDS.index('sn'))
+        confed_addr = sh.cell_value(row, VALID_FIELDS.index('ipmi_addr'))
+        confed_netmask = sh.cell_value(row, VALID_FIELDS.index('ipmi_netmask'))
+        confed_gateway = sh.cell_value(row, VALID_FIELDS.index('ipmi_gateway'))
+        print('sn ', confed_sn, ', ipmi addr ', confed_addr, ', ipmi netmask ',
+              confed_netmask, ', ipmi gateway ', confed_gateway)
+        conf_info = {
+            'address': confed_addr,
+            'netmask': confed_netmask,
+            'gateway': confed_gateway,
+            'state': states.IPMI_CONF_CONFED,
+            'updated_at': datetime.datetime.now()
+        }
+        db_api.update_ipmi_conf_by_sn(confed_sn, conf_info)
+
+
+def force_update_ironic():
+    icli = get_ironic_client()
+    node_list = icli.node.list()
+
+    db_api = dbapi.API()
+
+    all_ipmis = db_api.get_all_ipmi()
+
+    for conf in all_ipmis:
+        for node in node_list:
+            node_info = icli.node.get(node.uuid)
+            if node_info.extra['serial_number'] == conf.sn:
+                patches = [
+                    {
+                        'op': 'add',
+                        'path': '/driver_info/ipmi_address',
+                        'value': conf.address
+                    }
+                ]
+                icli.node.update(node.uuid, patches)
 
 
 def update_conf(conf):
@@ -140,7 +228,7 @@ def update_conf(conf):
         confed_gateway = sh.cell_value(row, VALID_FIELDS.index('ipmi_gateway'))
         if db_api.get_ipmi_conf_by_sn(confed_sn):
             print('Bingo! %s IPMI conf will be updated...')
-            print('sn ', confed_sn, ', ipmi addr ', confed_addr,', ipmi netmask ',
+            print('sn ', confed_sn, ', ipmi addr ', confed_addr, ', ipmi netmask ',
                   confed_netmask, ', ipmi gateway ', confed_gateway)
             conf_info = {
                 'address': confed_addr,
@@ -174,17 +262,37 @@ def main():
         export_tpl()
     elif args.update_conf:
         update_conf(args.update_conf)
+    elif args.export_raid_xls:
+        export_raid_xls()
+    elif args.raid_opt_file:
+        import_raid_config(args.raid_opt_file)
+    elif args.direct_insert_conf:
+        direct_insert_conf(args.direct_insert_conf)
+    elif args.force_update_ironic:
+        force_update_ironic()
 
 
 def get_argparser():
     parser = argparse.ArgumentParser()
+
+    # https://docs.python.org/3/library/argparse.html#action
+    # argparse implicitly converts internal dashes to underscores
     parser.add_argument('--list-devices-raw',
                         help='Display devices basic info that is not processed',
                         action='store_true')
     parser.add_argument('--export-tpl', help='Export template of devices info',
                         action='store_true')
+    parser.add_argument('--raid-opt-file', help='Raid options path',
+                        action='store')
+    parser.add_argument('--export-raid-xls', help='Export raid configuration excel worksheet',
+                        action='store_true')
     parser.add_argument('--update-conf', metavar='infile',
                         help='Update devices info configured by user')
+    parser.add_argument('--direct-insert-conf', metavar='direct',
+                        help='Directly insert devices info configured by user')
+    parser.add_argument('--force-update-ironic', action='store_true',
+                        default=False,
+                        help='forcefully update ironic info')
     parser.add_argument('--execute', metavar='device-or-all',
                         help='Execute automation tasks')
     parser.add_argument('--list-devices',

@@ -13,7 +13,6 @@ LOG = logging.getLogger(__name__)
 
 
 class API(object):
-
     def __init__(self):
         super(API, self).__init__()
         self._init_db_connect()
@@ -53,10 +52,24 @@ class API(object):
         session.close()
         return all_raws
 
+    def get_all_ipmi(self):
+        session = sessionmaker(bind=self.engine)()
+        all_configs = session.query(models.IPMIConf).all()
+        session.close()
+        return all_configs
+
     def update_ipmi_conf_by_sn(self, sn, values):
         session = sessionmaker(bind=self.engine)()
-        session.query(models.IPMIConf).filter_by(
+        count = session.query(models.IPMIConf).filter_by(
             sn=sn).update(values)
+
+        if count <= 0:
+            # create new record and update
+            ipmi_id = str(uuid.uuid4())
+            session.add(models.IPMIConf(id=ipmi_id, sn=sn, state=states.IPMI_CONF_RAW))
+            session.query(models.IPMIConf).filter_by(
+                sn=sn).update(values)
+
         session.commit()
         session.close()
 
@@ -135,6 +148,55 @@ class API(object):
 
         return raid_config, err
 
+    def save_raid_opt(self, opt):
+        session = None
+        err = None
+
+        try:
+            session = sessionmaker(bind=self.engine)()
+            session.add(models.RAIDOpt(
+                id=str(uuid.uuid4()),
+                sn=opt.get('sn', None),
+                ssd=opt.get('ssd', 0),
+                sas=opt.get('sas', 0),
+                sata=opt.get('sata', 0),
+                config=opt['config']
+            ))
+            session.commit()
+        except Exception as e:
+            LOG.error(e)
+        finally:
+            if session:
+                try:
+                    session.close()
+                except Exception as e:
+                    LOG.error('failed closing session', e)
+
+    def save_all_raid_opts(self, opts):
+        session = None
+        err = None
+
+        try:
+            session = sessionmaker(bind=self.engine)()
+            for opt in opts:
+                session.add(models.RAIDOpt(
+                    id=str(uuid.uuid4()),
+                    sn=opt.get('sn', None),
+                    ssd=opt.get('ssd', 0),
+                    sas=opt.get('sas', 0),
+                    sata=opt.get('sata', 0),
+                    config=opt['config']
+                ))
+            session.commit()
+        except Exception as e:
+            LOG.error(e)
+        finally:
+            if session:
+                try:
+                    session.close()
+                except Exception as e:
+                    LOG.error('failed closing session', e)
+
     def get_all_raid_config(self):
         """
         get all existing RAID configurations
@@ -160,4 +222,3 @@ class API(object):
                     LOG.error(" Failed closing session %s " % Exception)
 
         return raid_configs, err
-
